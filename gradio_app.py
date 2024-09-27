@@ -1,6 +1,7 @@
 import os
 import re
 from num2words import num2words
+from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
 import gradio as gr
 import torch
 import torchaudio
@@ -14,14 +15,16 @@ import numpy as np
 import random
 import uuid
 import nltk
+from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF
 nltk.download('punkt')
 
 DEMO_PATH = os.getenv("DEMO_PATH", "./demo")
 TMP_PATH = os.getenv("TMP_PATH", "./demo/temp")
 MODELS_PATH = os.getenv("MODELS_PATH", "./pretrained_models")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-whisper_model, align_model, voicecraft_model = None, None, None
+model, align_model, voicecraft_model = None, None, None
 _whitespace_re = re.compile(r"\s+")
+align_model_options = list(DEFAULT_ALIGN_MODELS_HF.keys())
 
 def get_random_string():
     return "".join(str(uuid.uuid4()).split("-"))
@@ -39,9 +42,9 @@ def seed_everything(seed):
 
 
 class WhisperxAlignModel:
-    def __init__(self):
+    def __init__(self, language_code):
         from whisperx import load_align_model
-        self.model, self.metadata = load_align_model(language_code="en", device=device)
+        self.model, self.metadata = load_align_model(language_code=language_code, device=device)
 
     def align(self, segments, audio_path):
         from whisperx import align, load_audio
@@ -49,38 +52,45 @@ class WhisperxAlignModel:
         return align(segments, self.model, self.metadata, audio, device, return_char_alignments=False)["segments"]
 
 
-class WhisperModel:
-    def __init__(self, model_name):
-        from whisper import load_model
-        self.model = load_model(model_name, device)
+# class Model:
+#     def __init__(self, model_name, target_lang):
+#         from whisper import load_model
+#         model = Wav2Vec2ForCTC.from_pretrained(model_name, target_lang=target_lang)
+#         self.model = load_model(model_name, device)
 
-        from whisper.tokenizer import get_tokenizer
-        tokenizer = get_tokenizer(multilingual=False)
-        self.supress_tokens = [-1] + [
-            i
-            for i in range(tokenizer.eot)
-            if all(c in "0123456789" for c in tokenizer.decode([i]).removeprefix(" "))
-        ]
+#         from whisper.tokenizer import get_tokenizer
+#         tokenizer = get_tokenizer(multilingual=False)
+#         self.supress_tokens = [-1] + [
+#             i
+#             for i in range(tokenizer.eot)
+#             if all(c in "0123456789" for c in tokenizer.decode([i]).removeprefix(" "))
+#         ]
 
-    def transcribe(self, audio_path):
-        return self.model.transcribe(audio_path, suppress_tokens=self.supress_tokens, word_timestamps=True)["segments"]
+#     def transcribe(self, audio_path):
+#         return self.model.transcribe(audio_path, suppress_tokens=self.supress_tokens, word_timestamps=True)["segments"]
+
+# class WhisperxModel:
+#     def __init__(self, model_name, align_model: WhisperxAlignModel):
+#         from whisperx import load_model
+#         print(device)
+#         self.model = load_model(model_name,
+#                                 device,
+#                                 compute_type='float32',
+#                                 asr_options={"suppress_numerals": True,
+#                                                 "max_new_tokens": None,
+#                                                 "clip_timestamps": None, 
+#                                                 "hallucination_silence_threshold": None})
+#         self.align_model = align_model
+
+#     def transcribe(self, audio_path):
+#         segments = self.model.transcribe(audio_path, batch_size=8)["segments"]
+#         for segment in segments:
+#             segment['text'] = replace_numbers_with_words(segment['text'])
+#         return self.align_model.align(segments, audio_path)
 
 
-class WhisperxModel:
-    def __init__(self, model_name, align_model: WhisperxAlignModel):
-        from whisperx import load_model
-        self.model = load_model(model_name, device, asr_options={"suppress_numerals": True, "max_new_tokens": None, "clip_timestamps": None, "hallucination_silence_threshold": None})
-        self.align_model = align_model
-
-    def transcribe(self, audio_path):
-        segments = self.model.transcribe(audio_path, batch_size=8)["segments"]
-        for segment in segments:
-            segment['text'] = replace_numbers_with_words(segment['text'])
-        return self.align_model.align(segments, audio_path)
-
-
-def load_models(whisper_backend_name, whisper_model_name, alignment_model_name, voicecraft_model_name):
-    global transcribe_model, align_model, voicecraft_model
+def load_models(language_choice, voicecraft_model_name):
+    global align_model, voicecraft_model
 
     if voicecraft_model_name == "330M":
         voicecraft_model_name = "giga330M"
@@ -91,16 +101,16 @@ def load_models(whisper_backend_name, whisper_model_name, alignment_model_name, 
     elif voicecraft_model_name == "830M_TTSEnhanced":
         voicecraft_model_name = "830M_TTSEnhanced"
 
-    if alignment_model_name is not None:
-        align_model = WhisperxAlignModel()
+    align_model = WhisperxAlignModel(language_choice)
 
-    if whisper_model_name is not None:
-        if whisper_backend_name == "whisper":
-            transcribe_model = WhisperModel(whisper_model_name)
-        else:
-            if align_model is None:
-                raise gr.Error("Align model required for whisperx backend")
-            transcribe_model = WhisperxModel(whisper_model_name, align_model)
+    # if model_name is not None:
+    #     if whisper_backend_name == "whisper":
+    #         transcribe_model = Model(model_name)
+    #     else:
+    #         if align_model is None:
+    #             raise gr.Error("Align model required for whisperx backend")
+    #         transcribe_model = WhisperxModel(model_name, align_model)
+    # transcribe_model = WhisperxModel(model_name, align_model)
 
     voicecraft_name = f"{voicecraft_model_name}.pth"
     model = voicecraft.VoiceCraft.from_pretrained(f"pyp1/VoiceCraft_{voicecraft_name.replace('.pth', '')}")
@@ -125,7 +135,13 @@ def load_models(whisper_backend_name, whisper_model_name, alignment_model_name, 
 def get_transcribe_state(segments):
     words_info = [word_info for segment in segments for word_info in segment["words"]]
     transcript = " ".join([segment["text"] for segment in segments])
+    print('get_transcribe_state')
+    print(segments)
+    print("words_info")
+    print(words_info)
     transcript = transcript[1:] if transcript[0] == " " else transcript
+    # remove items from words_info where 'start' is missing
+    words_info = [word for word in words_info if 'start' in word]
     return {
         "segments": segments,
         "transcript": transcript,
@@ -136,21 +152,21 @@ def get_transcribe_state(segments):
     }
 
 
-def transcribe(seed, audio_path):
-    if transcribe_model is None:
-        raise gr.Error("Transcription model not loaded")
-    seed_everything(seed)
+# def transcribe(seed, audio_path):
+#     if transcribe_model is None:
+#         raise gr.Error("Transcription model not loaded")
+#     seed_everything(seed)
 
-    segments = transcribe_model.transcribe(audio_path)
-    state = get_transcribe_state(segments)
+#     segments = transcribe_model.transcribe(audio_path)
+#     state = get_transcribe_state(segments)
 
-    return [
-        state["transcript"], state["transcript_with_start_time"], state["transcript_with_end_time"],
-        gr.Dropdown(value=state["word_bounds"][-1], choices=state["word_bounds"], interactive=True), # prompt_to_word
-        gr.Dropdown(value=state["word_bounds"][0], choices=state["word_bounds"], interactive=True), # edit_from_word
-        gr.Dropdown(value=state["word_bounds"][-1], choices=state["word_bounds"], interactive=True), # edit_to_word
-        state
-    ]
+#     return [
+#         state["transcript"], state["transcript_with_start_time"], state["transcript_with_end_time"],
+#         gr.Dropdown(value=state["word_bounds"][-1], choices=state["word_bounds"], interactive=True), # prompt_to_word
+#         gr.Dropdown(value=state["word_bounds"][0], choices=state["word_bounds"], interactive=True), # edit_from_word
+#         gr.Dropdown(value=state["word_bounds"][-1], choices=state["word_bounds"], interactive=True), # edit_to_word
+#         state
+#     ]
 
 
 def align_segments(transcript, audio_path):
@@ -179,6 +195,7 @@ def align(seed, transcript, audio_path):
     if align_model is None:
         raise gr.Error("Align model not loaded")
     seed_everything(seed)
+    print("transcript:" + str(transcript))
     transcript = replace_numbers_with_words(transcript).replace("  ", " ").replace("  ", " ")
     fragments = align_segments(transcript, audio_path)
     segments = [{
@@ -186,7 +203,11 @@ def align(seed, transcript, audio_path):
         "end": float(fragment["end"]),
         "text": " ".join(fragment["lines"])
     } for fragment in fragments["fragments"]]
+    print(segments)
     segments = align_model.align(segments, audio_path)
+    print(segments)
+    if not segments:
+        raise gr.Error("No alignment found")
     state = get_transcribe_state(segments)
 
     return [
@@ -440,10 +461,11 @@ def get_app():
                     with gr.Row():
                         voicecraft_model_choice = gr.Radio(label="VoiceCraft model", value="830M_TTSEnhanced",
                                                         choices=["330M", "830M", "330M_TTSEnhanced", "830M_TTSEnhanced"])
-                        whisper_backend_choice = gr.Radio(label="Whisper backend", value="whisperX", choices=["whisperX", "whisper"])
-                        whisper_model_choice = gr.Radio(label="Whisper model", value="base.en",
-                                                        choices=[None, "base.en", "small.en", "medium.en", "large"])
-                        align_model_choice = gr.Radio(label="Forced alignment model", value="whisperX", choices=["whisperX", None])
+                        # asr_model_choice = gr.Radio(label="Transcription Model", value="base.en",
+                        #                                 choices=[None, "base.en", "small.en", "medium.en", "large"])
+
+                        language_choice = gr.Dropdown(label="Alignment Language", value="zh", choices=align_model_options,)
+                        # align_model_choice = gr.Radio(label="Forced alignment model", value="zh", choices=align_model_options)
 
         with gr.Row():
             with gr.Column(scale=2):
@@ -456,7 +478,7 @@ def get_app():
                     with gr.Accordion("Word end time", open=False):
                         transcript_with_end_time = gr.Textbox(label="End time", lines=5, interactive=False, info="End time after each word")
 
-                    transcribe_btn = gr.Button(value="Transcribe")
+                    # transcribe_btn = gr.Button(value="Transcribe")
                     align_btn = gr.Button(value="Align")
 
             with gr.Column(scale=3):
@@ -535,16 +557,16 @@ def get_app():
                                 outputs=[transcript, edit_from_word, edit_to_word])
 
         load_models_btn.click(fn=load_models,
-                            inputs=[whisper_backend_choice, whisper_model_choice, align_model_choice, voicecraft_model_choice],
+                            inputs=[language_choice, voicecraft_model_choice],
                             outputs=[models_selector])
 
         input_audio.upload(fn=update_input_audio,
                         inputs=[input_audio],
                         outputs=[prompt_end_time, edit_start_time, edit_end_time])
-        transcribe_btn.click(fn=transcribe,
-                            inputs=[seed, input_audio],
-                            outputs=[original_transcript, transcript_with_start_time, transcript_with_end_time,
-                                    prompt_to_word, edit_from_word, edit_to_word, transcribe_state])
+        # transcribe_btn.click(fn=transcribe,
+        #                     inputs=[seed, input_audio],
+        #                     outputs=[original_transcript, transcript_with_start_time, transcript_with_end_time,
+        #                             prompt_to_word, edit_from_word, edit_to_word, transcribe_state])
         align_btn.click(fn=align,
                         inputs=[seed, original_transcript, input_audio],
                         outputs=[transcript_with_start_time, transcript_with_end_time,

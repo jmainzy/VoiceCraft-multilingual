@@ -1,8 +1,13 @@
 import argparse
+import glob
+import pandas as pd
+from datasets import Audio, Dataset
+import process_text as prep
+import torch
+
 def parse_args():
     parser = argparse.ArgumentParser(description="encode the librilight dataset using encodec model")
-    parser.add_argument("--dataset_size", type=str, default='xs', help='sizes of gigaspeech, xs, s, m, l, xl. we use xl for VoiceCraft training, xs is good for debugging')
-    parser.add_argument('--download_to', type=str, default="/data/scratch/pyp/datasets/gigaspeech_debug", help="dir where you want the huggingface gigaspeech dataset to be downloaded to")
+    parser.add_argument("--dataset", type=str, default='dataset', help='name of input data')
     parser.add_argument('--save_dir', type=str, default="/data/scratch/pyp/datasets/gigaspeech_phn_enc_manifest_debug", help="path to the manifest, phonemes, and encodec codes dirs")
     parser.add_argument('--encodec_model_path', type=str, default="/data/scratch/pyp/exp_pyp/audiocraft/encodec/xps/6f79c6a8/checkpoint.th")
     parser.add_argument('--n_workers', type=int, default=4, help="Number of parallel worker processes")
@@ -14,6 +19,56 @@ def parse_args():
     parser.add_argument('--len_cap', type=float, default=35.0, help='will drop audios that are longer than this number')
     parser.add_argument('--max_len', type=int, default=30000, help='max length of audio in samples, if exceed, will cut a batch into half to process, decrease this number if OOM on your machine')
     return parser.parse_args()
+
+
+class mydataset(torch.utils.data.Dataset):
+    def __init__(self, split):
+        super().__init__()
+        self.data = dataset[split]
+    def __len__(self):
+        return len(self.data)
+    def __getitem__(self, ind):
+        try:
+            segment_id, audio, duration, text= \
+                    self.data[ind]['segment_id'], \
+                    torch.from_numpy(self.data[ind]['audio']['array']).float(), \
+                    self.data[ind]['duration'], \
+                    self.data[ind]['text']
+        except:
+            return None, None, None, None
+        
+        return segment_id, audio, duration, text
+    def collate(self, batch):
+        res = {'segment_id': [], "audio": [], "duration": [], "text": [], }
+        for item in batch:
+            if item[0] != None:
+                res['segment_id'].append(item[0])
+                res['audio'].append(item[1])
+                res['duration'].append(item[2])
+                res['text'].append(item[3])
+        return res
+
+
+def load_custom_data(dir):
+    '''
+    Make an audio dataset dict from a folder
+    '''
+    metadata={"audio":[], "duration":[], "segment_id":[], "text":[],"text_latin":[], "file":[]}
+    if dir[-1] != '/':
+        dir = dir+'/'
+    for file in glob.glob(dir+"*.tsv"):
+        print('reading file '+str(file))
+        data = pd.read_csv(file, sep='\t')
+        for index, row in data.iterrows():
+            metadata["audio"].append(dir+row['filename'])
+            metadata["duration"].append(float(row['duration']))
+            metadata["segment_id"].append(row['filename'].split('.')[-2])
+            metadata["text"].append(row['text'])
+            metadata["text_latin"].append(row['latin'])
+            metadata["file"].append(file)
+    
+    return Dataset.from_dict(metadata).cast_column("audio", Audio(sampling_rate=16_000))
+
 if __name__ == "__main__":
     import logging
     formatter = (
@@ -32,12 +87,18 @@ if __name__ == "__main__":
     from tokenizer import TextTokenizer, tokenize_text
     
     # get the path
-    phn_save_root = os.path.join(args.save_dir, args.dataset_size, "phonemes")
-    codes_save_root = os.path.join(args.save_dir, args.dataset_size, "encodec_16khz_4codebooks")
-    vocab_fn = os.path.join(args.save_dir, args.dataset_size, "vocab.txt")
+    phn_save_root = os.path.join(args.save_dir, "phonemes")
+    codes_save_root = os.path.join(args.save_dir, "encodec_16khz_4codebooks")
+    vocab_fn = os.path.join(args.save_dir, "vocab.txt")
     os.makedirs(phn_save_root, exist_ok=True)
     os.makedirs(codes_save_root, exist_ok=True)
 
+    if torch.cuda.is_available():
+        DEFAULT_DEVICE = "cuda"
+    elif torch.backends.mps.is_available():
+        DEFAULT_DEVICE = "mps"
+    else:
+        DEFAULT_DEVICE = "cpu"
 
     def sort_by_audio_len(lens):
         inds = np.argsort(lens).tolist()
@@ -59,7 +120,7 @@ if __name__ == "__main__":
     # load the encodec model
     from audiocraft.solvers import CompressionSolver
     model = CompressionSolver.model_from_checkpoint(args.encodec_model_path)
-    model = model.cuda()
+    model = model.to(DEFAULT_DEVICE)
     model = model.eval()
     text_tokenizer = TextTokenizer()
 
@@ -74,15 +135,18 @@ if __name__ == "__main__":
     word2sym = { "h æ ʃ h ɐ ʃ p ɚ s ɛ n t": "<MUSIC>", "h æ ʃ p ɚ s ɛ n t h æ ʃ": "<SIL>", "p ɚ s ɛ n t h ɐ ʃ p ɚ s ɛ n t": "<OTHER>", "p ɚ s ɛ n t p ɚ s ɛ n t h æ ʃ": "<NOISE>"}
     forbidden_words = set(['#%#', '##%', '%%#', '%#%'])
 
-    dc = DownloadConfig(cache_dir=args.download_to)
+    # dc = DownloadConfig(cache_dir=args.download_to)
     stime = time.time()
     logging.info("loading the dataset...")
-    gs = load_dataset("speechcolab/gigaspeech", args.dataset_size, use_auth_token=True, cache_dir = args.download_to, download_config=dc)
+    # gs = load_dataset("speechcolab/gigaspeech", args.dataset_size, use_auth_token=True, cache_dir = args.download_to, download_config=dc)
+    dataset = load_custom_data(args.dataset)
+    dataset = dataset.map(prep.remove_special_chars)
     logging.info(f"time spend on loading the dataset: {time.time() - stime:.2f} seconds")
 
-    splits = ['validation', 'test', 'train']
-    
-    logging.info(f"gigaspeech dataset {args.dataset_size} info: {gs}")
+    splits = ['test', 'train']
+    dataset = dataset.train_test_split(test_size=0.1, shuffle=True, seed=42)
+            
+    logging.info(f"dataset info: {dataset}")
     logging.info(f"phonemizing...")
     phn_vocab = set()
     all_lens = []
@@ -91,8 +155,9 @@ if __name__ == "__main__":
     for split in tqdm.tqdm(splits):
         skip = 0
         logging.info(f"now processing split {split}...")
-        for item in tqdm.tqdm(gs[split]):
+        for item in tqdm.tqdm(dataset[split]):
             save_fn = os.path.join(phn_save_root, item['segment_id']+".txt")
+            print(item)
             text = item['text']
             if sum(word in forbidden_words for word in text.split(" ")):
                 logging.info(f"skip {item['segment_id']}, because it contains forbiden words. It's transcript: {text}")
@@ -108,7 +173,7 @@ if __name__ == "__main__":
             all_lens.append(len(phn_seq.split(" ")))
             with open(save_fn, "w") as f:
                 f.write(phn_seq)
-        logging.info(f"split {split} has {len(gs[split])} samples in total, skipped {skip} due to forbiden words")
+        logging.info(f"split {split} has {len(dataset[split])} samples in total, skipped {skip} due to forbiden words")
 
     print(f"phn vocab size: {len(list(phn_vocab))}")
     print("phn sequence stats: ")
@@ -124,54 +189,28 @@ if __name__ == "__main__":
             else:
                 f.write(f"{str(i)} {phn}")
 
-    class mydataset(torch.utils.data.Dataset):
-        def __init__(self, split):
-            super().__init__()
-            self.data = gs[split]
-        def __len__(self):
-            return len(self.data)
-        def __getitem__(self, ind):
-            try:
-                segment_id, audio, sr, text, begin_time, end_time = self.data[ind]['segment_id'], torch.from_numpy(self.data[ind]['audio']['array']).float(), self.data[ind]['audio']['sampling_rate'], self.data[ind]['text'], self.data[ind]['begin_time'], self.data[ind]['end_time']
-            except:
-                return None, None, None, None, None, None
-            
-            return segment_id, audio, sr, text, begin_time, end_time
-        def collate(self, batch):
-            res = {'segment_id': [], "audio": [], "sr": [], "text": [], "begin_time": [], "end_time": []}
-            for item in batch:
-                if item[0] != None:
-                    res['segment_id'].append(item[0])
-                    res['audio'].append(item[1])
-                    res['sr'].append(item[2])
-                    res['text'].append(item[3])
-                    res['begin_time'].append(item[4])
-                    res['end_time'].append(item[5])
-            return res
-
-
     ## encodec codes extraction
     logging.info("encodec encoding...")
     train_dataset = mydataset('train')
     train_loader = torch.torch.utils.data.DataLoader(train_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=train_dataset.collate)
-    validation_dataset = mydataset('validation')
-    validation_loader = torch.torch.utils.data.DataLoader(validation_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=validation_dataset.collate)
+    # validation_dataset = mydataset('validation')
+    # validation_loader = torch.torch.utils.data.DataLoader(validation_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=validation_dataset.collate)
     test_dataset = mydataset('test')
     test_loader = torch.torch.utils.data.DataLoader(test_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=test_dataset.collate)
-    splits = ['validation', 'test', 'train']
-    loaders = [validation_loader, test_loader, train_loader]
+    splits = ['test', 'train']
+    loaders = [test_loader, train_loader]
     # splits = ['validation'] # for debug
     # loaders = [validation_loader]
     for split, loader in zip(splits, loaders):
         skip = 0
         logging.info(f"now processing split {split}...")
-        mega_n_steps = int(np.ceil(len(gs[split]) / args.mega_batch_size))
+        mega_n_steps = int(np.ceil(len(dataset[split]) / args.mega_batch_size))
         logging.info(f"partition the split {split} into {mega_n_steps} parts, each has {args.mega_batch_size} samples")
         for m, mega_batch in enumerate(loader):
             logging.info(f"====================================")
             logging.info(f"====================================")
             logging.info(f"now processing mega step {m+1}/{mega_n_steps}")
-            lengths = np.array(mega_batch['end_time']) - np.array(mega_batch['begin_time'])
+            lengths = np.array(mega_batch['duration'])
             sorted_inds = sort_by_audio_len(lengths)
             for j in range(len(sorted_inds))[::-1]:
                 if lengths[sorted_inds[j]] < 0.2 or lengths[sorted_inds[j]] > args.len_cap: # skip samples that are too short (shorter than 0.2s), or too big (bigger than 80s)
@@ -182,7 +221,6 @@ if __name__ == "__main__":
             for n in tqdm.tqdm(range(n_steps), disable=True):
                 inds_used = sorted_inds[n*args.batch_size:(n+1)*args.batch_size]
                 audio_batch = [mega_batch['audio'][id] for id in inds_used]
-                sr_batch = [mega_batch['sr'][id] for id in inds_used]
                 segment_id_batch = [mega_batch['segment_id'][id] for id in inds_used]
                 text_batch = [mega_batch['text'][id] for id in inds_used]
                 padded_wav = torch.nn.utils.rnn.pad_sequence(audio_batch, batch_first=True).unsqueeze(1) # [B, T] -> [B, 1, T]
