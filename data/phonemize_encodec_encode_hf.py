@@ -1,9 +1,14 @@
 import argparse
 import glob
-import pandas as pd
 from datasets import Audio, Dataset
 import process_text as prep
 import torch
+import numpy as np
+import pandas as pd
+import os
+import tqdm
+import time
+from tokenizer import TextTokenizer, tokenize_text
 
 def parse_args():
     parser = argparse.ArgumentParser(description="encode the librilight dataset using encodec model")
@@ -21,9 +26,9 @@ def parse_args():
     return parser.parse_args()
 
 
-class mydataset(torch.utils.data.Dataset):
-    def __init__(self, split):
-        super().__init__()
+class AudioDataset(torch.utils.data.Dataset):
+    # Dataset in PyTorch format (https://pytorch.org/tutorials/beginner/basics/data_tutorial.html)
+    def __init__(self, split, dataset):
         self.data = dataset[split]
     def __len__(self):
         return len(self.data)
@@ -34,9 +39,9 @@ class mydataset(torch.utils.data.Dataset):
                     torch.from_numpy(self.data[ind]['audio']['array']).float(), \
                     self.data[ind]['duration'], \
                     self.data[ind]['text']
-        except:
+        except Exception as e:
+            print(f"Error: {e}")
             return None, None, None, None
-        
         return segment_id, audio, duration, text
     def collate(self, batch):
         res = {'segment_id': [], "audio": [], "duration": [], "text": [], }
@@ -76,15 +81,6 @@ if __name__ == "__main__":
     )
     logging.basicConfig(format=formatter, level=logging.INFO)
     args = parse_args()
-
-    import os
-    import numpy as np
-    import torch
-    import tqdm
-    import time
-    from datasets import load_dataset, DownloadConfig
-
-    from tokenizer import TextTokenizer, tokenize_text
     
     # get the path
     phn_save_root = os.path.join(args.save_dir, "phonemes")
@@ -191,12 +187,17 @@ if __name__ == "__main__":
 
     ## encodec codes extraction
     logging.info("encodec encoding...")
-    train_dataset = mydataset('train')
+    train_dataset = AudioDataset('train', dataset)
+    print("Train data for encodec:")
+    print(train_dataset.data)
     train_loader = torch.torch.utils.data.DataLoader(train_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=train_dataset.collate)
     # validation_dataset = mydataset('validation')
     # validation_loader = torch.torch.utils.data.DataLoader(validation_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=validation_dataset.collate)
-    test_dataset = mydataset('test')
+    test_dataset = AudioDataset('test', dataset)
+    print("Test data for encodec:")
+    print(test_dataset.data)
     test_loader = torch.torch.utils.data.DataLoader(test_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=test_dataset.collate)
+    print(test_dataset[0])
     splits = ['test', 'train']
     loaders = [test_loader, train_loader]
     # splits = ['validation'] # for debug
@@ -228,12 +229,12 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     if max(all_lens) > args.max_len and len(all_lens) > 1: # NOTE decrease args.max_len if OOM, or chunk it into more than 2 forward passes
                         codes = []
-                        inwav = padded_wav.cuda()
+                        inwav = padded_wav.to(DEFAULT_DEVICE)
                         codes.append(model.encode(inwav[:len(inwav)//2])[0].cpu())
                         codes.append(model.encode(inwav[len(inwav)//2:])[0].cpu())
                         codes = torch.cat(codes, dim=0)
                     else:
-                        encoded_frames = model.encode(padded_wav.cuda())
+                        encoded_frames = model.encode(padded_wav.to(DEFAULT_DEVICE))
                         # logging.info(f"encoded_frames: {encoded_frames[0].shape}")
                         codes = encoded_frames[0].cpu()
 
