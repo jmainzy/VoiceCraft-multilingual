@@ -1,21 +1,19 @@
 #!/bin/bash
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate voicecraft
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-export WORLD_SIZE=4
+# export CUDA_VISIBLE_DEVICES=0,1,2,3
+export WORLD_SIZE=1
 
-dataset=gigaspeech
-mkdir -p ./logs/${dataset}
-
-exp_root="path/to/store/exp_results"
-exp_name=e830M_ft
-dataset_dir="path/to/stored_extracted_codes_and_phonemes/xl" # xs if you only extracted xs in previous step
+dataset=mydataset
+exp_root="../experiments/custom01"
+exp_name=e830M
+dataset_dir="../data/mydataset"
 encodec_codes_folder_name="encodec_16khz_4codebooks"
-load_model_from="./pretrained_models/giga830M.pth"
+load_model_from="../pretrained_models/giga830M.pth"
 
 # export CUDA_LAUNCH_BLOCKING=1 # for debugging
 
-torchrun --nnodes=1 --rdzv-backend=c10d --rdzv-endpoint=localhost:41977 --nproc_per_node=${WORLD_SIZE} \
+torchrun --nnodes=1 \
 ../main.py \
 --load_model_from ${load_model_from} \
 --reduced_eog 1 \
@@ -25,7 +23,7 @@ torchrun --nnodes=1 --rdzv-backend=c10d --rdzv-endpoint=localhost:41977 --nproc_
 --pad_x 0 \
 --codebook_weight "[3,1,1,1]" \
 --encodec_sr 50 \
---num_steps 500000 \
+--num_epochs 4 \
 --lr 0.00001 \
 --warmup_fraction 0.1 \
 --optimizer_name "AdamW" \
@@ -62,7 +60,7 @@ torchrun --nnodes=1 --rdzv-backend=c10d --rdzv-endpoint=localhost:41977 --nproc_
 --max_mask_portion 0.9 \
 --min_gap 5 \
 --num_workers 8 \
---dynamic_batching 1 \
+--dynamic_batching 0 \
 --dataset $dataset \
 --exp_dir "${exp_root}/${dataset}/${exp_name}" \
 --dataset_dir ${dataset_dir}

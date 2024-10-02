@@ -1,13 +1,11 @@
 import argparse
-import glob
-from datasets import Audio, Dataset
 import process_text as prep
 import torch
 import numpy as np
-import pandas as pd
 import os
 import tqdm
 import time
+from custom_dataset import AudioDataset, load_custom_data
 from tokenizer import TextTokenizer, tokenize_text
 
 def parse_args():
@@ -24,55 +22,6 @@ def parse_args():
     parser.add_argument('--len_cap', type=float, default=35.0, help='will drop audios that are longer than this number')
     parser.add_argument('--max_len', type=int, default=30000, help='max length of audio in samples, if exceed, will cut a batch into half to process, decrease this number if OOM on your machine')
     return parser.parse_args()
-
-
-class AudioDataset(torch.utils.data.Dataset):
-    # Dataset in PyTorch format (https://pytorch.org/tutorials/beginner/basics/data_tutorial.html)
-    def __init__(self, split, dataset):
-        self.data = dataset[split]
-    def __len__(self):
-        return len(self.data)
-    def __getitem__(self, ind):
-        try:
-            segment_id, audio, duration, text= \
-                    self.data[ind]['segment_id'], \
-                    torch.from_numpy(self.data[ind]['audio']['array']).float(), \
-                    self.data[ind]['duration'], \
-                    self.data[ind]['text']
-        except Exception as e:
-            print(f"Error: {e}")
-            return None, None, None, None
-        return segment_id, audio, duration, text
-    def collate(self, batch):
-        res = {'segment_id': [], "audio": [], "duration": [], "text": [], }
-        for item in batch:
-            if item[0] != None:
-                res['segment_id'].append(item[0])
-                res['audio'].append(item[1])
-                res['duration'].append(item[2])
-                res['text'].append(item[3])
-        return res
-
-
-def load_custom_data(dir):
-    '''
-    Make an audio dataset dict from a folder
-    '''
-    metadata={"audio":[], "duration":[], "segment_id":[], "text":[],"text_latin":[], "file":[]}
-    if dir[-1] != '/':
-        dir = dir+'/'
-    for file in glob.glob(dir+"*.tsv"):
-        print('reading file '+str(file))
-        data = pd.read_csv(file, sep='\t')
-        for index, row in data.iterrows():
-            metadata["audio"].append(dir+row['filename'])
-            metadata["duration"].append(float(row['duration']))
-            metadata["segment_id"].append(row['filename'].split('.')[-2])
-            metadata["text"].append(row['text'])
-            metadata["text_latin"].append(row['latin'])
-            metadata["file"].append(file)
-    
-    return Dataset.from_dict(metadata).cast_column("audio", Audio(sampling_rate=16_000))
 
 if __name__ == "__main__":
     import logging
@@ -187,13 +136,13 @@ if __name__ == "__main__":
 
     ## encodec codes extraction
     logging.info("encodec encoding...")
-    train_dataset = AudioDataset('train', dataset)
+    train_dataset = AudioDataset.from_huggingface('train', dataset)
     print("Train data for encodec:")
     print(train_dataset.data)
     train_loader = torch.torch.utils.data.DataLoader(train_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=train_dataset.collate)
     # validation_dataset = mydataset('validation')
     # validation_loader = torch.torch.utils.data.DataLoader(validation_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=validation_dataset.collate)
-    test_dataset = AudioDataset('test', dataset)
+    test_dataset = AudioDataset.from_huggingface('test', dataset)
     print("Test data for encodec:")
     print(test_dataset.data)
     test_loader = torch.torch.utils.data.DataLoader(test_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=test_dataset.collate)

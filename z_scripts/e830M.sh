@@ -7,9 +7,9 @@ export WORLD_SIZE=4
 dataset=gigaspeech
 mkdir -p ./logs/${dataset}
 
-exp_root="path/to/store/exp_results"
+exp_root="../experiments/custom01"
 exp_name=e830M
-dataset_dir="path/to/stored_extracted_codes_and_phonemes/xl" # xs if you only extracted xs in previous step
+dataset_dir="../data/phonemes/phonemes" # xs if you only extracted xs in previous step
 encodec_codes_folder_name="encodec_16khz_4codebooks"
 
 # export CUDA_LAUNCH_BLOCKING=1 # for debugging

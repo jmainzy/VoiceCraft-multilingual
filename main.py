@@ -7,13 +7,32 @@ import torch.distributed as dist
 from config import MyParser
 from steps import trainer
 
+def set_torch_config():
+
+    if torch.cuda.is_available():
+        DEFAULT_DEVICE = "cuda"
+    elif torch.backends.mps.is_available():
+        DEFAULT_DEVICE = "mps"
+    else:
+        DEFAULT_DEVICE = "cpu"
+
+    if DEFAULT_DEVICE == "cuda":
+        torch.set_default_tensor_type(torch.cuda.FloatTensor)
+    else:
+        torch.set_default_tensor_type(torch.FloatTensor)
+    logging.debug(f"default Torch device: {DEFAULT_DEVICE}")
+    torch.set_default_device(DEFAULT_DEVICE)
+
+    return DEFAULT_DEVICE
 
 if __name__ == "__main__":
+
     formatter = (
         "%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d || %(message)s"
     )
     logging.basicConfig(format=formatter, level=logging.INFO)
-    
+    device = set_torch_config()
+
     torch.cuda.empty_cache()
     args = MyParser().parse_args()
     logging.info(args)
@@ -37,9 +56,15 @@ if __name__ == "__main__":
         with open("%s/args.pkl" % args.exp_dir, "wb") as f:
             pickle.dump(args, f)
 
-    dist.init_process_group(backend='nccl', init_method='env://')
+    if device == "cuda":
+        dist.init_process_group("nccl", init_method='env://')
+    else:
+        dist.init_process_group("gloo", init_method='env://')
+
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    torch.cuda.set_device(rank)
+    # torch.set_device(rank)
     my_trainer = trainer.Trainer(args, world_size, rank)
+    # set MPS as fallback device PYTORCH_ENABLE_MPS_FALLBACK=1
+
     my_trainer.train()

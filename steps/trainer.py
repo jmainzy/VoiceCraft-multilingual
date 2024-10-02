@@ -12,6 +12,7 @@ import numpy as np
 from torch.utils.data.distributed import DistributedSampler
 import logging
 from data import gigaspeech
+from data.custom_dataset import TTSDataset
 from models import voicecraft
 
 from .trainer_utils import DistributedDynamicBatchSampler, StatefulDistributedSampler, AverageMeter, print_model_info
@@ -25,6 +26,7 @@ class Trainer:
         self.args = args
         self.world_size, self.rank = world_size, rank
         self.device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+        torch.set_default_device(self.device)
         if self.rank == 0:
             self.writer = SummaryWriter(args.exp_dir)
         self.seed_everything(seed=self.args.seed)
@@ -42,8 +44,11 @@ class Trainer:
             self.total_step = int(math.floor(self.train_dataset_length / self.args.batch_size))*self.args.num_epochs
 
         self.optimizer, self.scheduler = self._setup_optimizer()
-        self.scaler = torch.cuda.amp.GradScaler()
-        self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[self.rank], find_unused_parameters=False)
+        self.scaler = torch.amp.GradScaler(device=self.device)
+        self.model = torch.nn.parallel.DistributedDataParallel(self.model, 
+                                                               device_ids=None if self.device.type == 'cpu' else [self.device], 
+                                                               find_unused_parameters=False
+                                                               )
         
         if self.rank == 0:
             self.early_stop_accu_steps = 0
@@ -51,6 +56,7 @@ class Trainer:
                 logging.info(f"max number of tokens per GPU in a training batch: {self.args.max_num_tokens}, max number of tokens per GPU in a inference batch: {self.args.val_max_num_tokens}")
             else:
                 logging.info(f"batch size (summed over all GPUs): {self.args.batch_size}")
+        logging.info('self.rank: %d, self.world_size: %d' % (self.rank, self.world_size))
 
     def train(self):
         flag = True
@@ -87,15 +93,21 @@ class Trainer:
                 for j in range(self.args.gradient_accumulation_steps):
                     cur_ind = all_inds[j::self.args.gradient_accumulation_steps]
                     cur_batch = {key: batch[key][cur_ind] for key in batch}
-                    with torch.cuda.amp.autocast(dtype=torch.float16 if self.args.precision=="float16" else torch.float32):
+                    with torch.amp.autocast(dtype=torch.float16 if self.args.precision=="float16" else torch.float32, device_type=self.device.type):
                         out = self.model(cur_batch)
                         if out == None:
                             continue
 
-                    record_loss = out['loss'].detach().to(self.rank) 
-                    top10acc = out['top10acc'].to(self.rank)
-                    effective_ntoken = out['effective_ntoken'].to(self.rank)
-                    is_nan = torch.tensor(int(torch.isnan(record_loss).any()), dtype=torch.float32, device=self.rank)
+                    if self.device.type == 'cpu':
+                        record_loss = out['loss']
+                        top10acc = out['top10acc']
+                        effective_ntoken = out['effective_ntoken']
+                        is_nan = torch.tensor(int(torch.isnan(record_loss).any()), dtype=torch.float32)
+                    else:
+                        record_loss = out['loss'].detach().to(self.rank) 
+                        top10acc = out['top10acc'].to(self.rank)
+                        effective_ntoken = out['effective_ntoken'].to(self.rank)
+                        is_nan = torch.tensor(int(torch.isnan(record_loss).any()), dtype=torch.float32, device=self.rank)
                     
                     dist.all_reduce(record_loss, op=dist.ReduceOp.SUM)
                     dist.all_reduce(top10acc, op=dist.ReduceOp.SUM)
@@ -330,8 +342,7 @@ class Trainer:
             pickle.dump(self.total_progress, f)
 
     def _setup_dataloader(self):
-        assert self.args.dataset == 'gigaspeech', "only gigaspeech is supported for now"
-        train_dataset, val_dataset = gigaspeech.dataset(self.args, 'train'), gigaspeech.dataset(self.args, 'validation')
+        train_dataset, val_dataset = TTSDataset(self.args, 'train'), TTSDataset(self.args, 'validation')
         
         if self.args.dynamic_batching:
             train_sampler = DistributedDynamicBatchSampler(train_dataset, self.args, num_replicas=self.world_size, rank=self.rank, shuffle=True, seed=self.args.seed, drop_last=True, lengths_list=train_dataset.lengths_list, verbose=True, epoch=0)
