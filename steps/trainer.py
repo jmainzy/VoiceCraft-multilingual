@@ -62,149 +62,151 @@ class Trainer:
         flag = True
         skip_flag = False
         data_start_time = time.time()
-        while flag:
-            self.train_sampler.set_epoch(self.progress['epoch'])
-            for i, batch in enumerate(self.train_loader):
-                data_end_time = time.time()
-                self.model.train()
-                if self.progress['step'] > self.total_step:
-                    flag = False
-                    self.validate_and_save()
-                    if self.rank == 0:
-                        self.writer.close()
-                    break
-                if isinstance(self.scheduler, Eden):
-                    self.scheduler.step_epoch(self.progress['step']//self.args.pseudo_epoch_size + 1)
-                if self.args.optimizer_name == "ScaledAdam":
-                    cur_lr = self.scheduler.get_last_lr()[0]
-                else:
-                    lrs = [param_group['lr'] for param_group in self.optimizer.param_groups]
-                    assert lrs[0] == lrs[1]
-                    cur_lr = lrs[0]
+        with tqdm(total=self.total_step) as pbar:
+            while flag:
+                self.train_sampler.set_epoch(self.progress['epoch'])
+                for i, batch in enumerate(self.train_loader):
+                    pbar.update(self.progress['step'])
+                    data_end_time = time.time()
+                    self.model.train()
+                    if self.progress['step'] > self.total_step:
+                        flag = False
+                        self.validate_and_save()
+                        if self.rank == 0:
+                            self.writer.close()
+                        break
+                    if isinstance(self.scheduler, Eden):
+                        self.scheduler.step_epoch(self.progress['step']//self.args.pseudo_epoch_size + 1)
+                    if self.args.optimizer_name == "ScaledAdam":
+                        cur_lr = self.scheduler.get_last_lr()[0]
+                    else:
+                        lrs = [param_group['lr'] for param_group in self.optimizer.param_groups]
+                        assert lrs[0] == lrs[1]
+                        cur_lr = lrs[0]
 
-                if self.rank == 0 and self.progress['step'] % self.args.tb_write_every_n_steps == 0:
-                    self.writer.add_scalar("train/lr", cur_lr, self.progress['step'])
+                    if self.rank == 0 and self.progress['step'] % self.args.tb_write_every_n_steps == 0:
+                        self.writer.add_scalar("train/lr", cur_lr, self.progress['step'])
 
-                all_inds = list(range(len(batch['y'])))
-                sum_losses = 0
-                sum_top10acc = 0
-                sum_ntoken = 0
-                sum_top10acc_cbi = [0 for _ in range(self.args.n_codebooks)]
-                for j in range(self.args.gradient_accumulation_steps):
-                    cur_ind = all_inds[j::self.args.gradient_accumulation_steps]
-                    cur_batch = {key: batch[key][cur_ind] for key in batch}
-                    with torch.amp.autocast(dtype=torch.float16 if self.args.precision=="float16" else torch.float32, device_type=self.device.type):
-                        out = self.model(cur_batch)
-                        if out == None:
+                    all_inds = list(range(len(batch['y'])))
+                    sum_losses = 0
+                    sum_top10acc = 0
+                    sum_ntoken = 0
+                    sum_top10acc_cbi = [0 for _ in range(self.args.n_codebooks)]
+                    for j in range(self.args.gradient_accumulation_steps):
+                        cur_ind = all_inds[j::self.args.gradient_accumulation_steps]
+                        cur_batch = {key: batch[key][cur_ind] for key in batch}
+                        with torch.amp.autocast(dtype=torch.float16 if self.args.precision=="float16" else torch.float32, device_type=self.device.type):
+                            out = self.model(cur_batch)
+                            if out == None:
+                                continue
+
+                        if self.device.type == 'cpu':
+                            record_loss = out['loss']
+                            top10acc = out['top10acc']
+                            effective_ntoken = out['effective_ntoken']
+                            is_nan = torch.tensor(int(torch.isnan(record_loss).any()), dtype=torch.float32)
+                        else:
+                            record_loss = out['loss'].detach().to(self.rank) 
+                            top10acc = out['top10acc'].to(self.rank)
+                            effective_ntoken = out['effective_ntoken'].to(self.rank)
+                            is_nan = torch.tensor(int(torch.isnan(record_loss).any()), dtype=torch.float32, device=self.rank)
+                        
+                        dist.all_reduce(record_loss, op=dist.ReduceOp.SUM)
+                        dist.all_reduce(top10acc, op=dist.ReduceOp.SUM)
+                        dist.all_reduce(effective_ntoken, op=dist.ReduceOp.SUM)
+                        dist.all_reduce(is_nan, op=dist.ReduceOp.SUM)
+                        
+                        # check if loss is nan
+                        if is_nan.item() > 0:
+                            logging.info(f"loss at step {self.progress['step']} is nan, therefore skip this batch")
+                            skip_flag = True
                             continue
 
-                    if self.device.type == 'cpu':
-                        record_loss = out['loss']
-                        top10acc = out['top10acc']
-                        effective_ntoken = out['effective_ntoken']
-                        is_nan = torch.tensor(int(torch.isnan(record_loss).any()), dtype=torch.float32)
-                    else:
-                        record_loss = out['loss'].detach().to(self.rank) 
-                        top10acc = out['top10acc'].to(self.rank)
-                        effective_ntoken = out['effective_ntoken'].to(self.rank)
-                        is_nan = torch.tensor(int(torch.isnan(record_loss).any()), dtype=torch.float32, device=self.rank)
-                    
-                    dist.all_reduce(record_loss, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(top10acc, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(effective_ntoken, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(is_nan, op=dist.ReduceOp.SUM)
-                    
-                    # check if loss is nan
-                    if is_nan.item() > 0:
-                        logging.info(f"loss at step {self.progress['step']} is nan, therefore skip this batch")
-                        skip_flag = True
+                        sum_losses += record_loss.item()
+                        sum_top10acc += top10acc.item()
+                        sum_ntoken += effective_ntoken.item()
+
+                        if 'top10acc_by_codebook' in out:
+                            for cb in range(self.args.n_codebooks):
+                                top10acc_cbi = out['top10acc_by_codebook'][cb]
+                                dist.all_reduce(top10acc_cbi, op=dist.ReduceOp.SUM)
+                                sum_top10acc_cbi[cb] += top10acc_cbi.item()
+                            
+                        if self.rank == 0:
+                            average_loss = sum_losses / sum_ntoken
+                            average_top10acc = sum_top10acc / sum_ntoken
+                            self.meters['train_loss'].update(average_loss, batch['x'].shape[0]*self.world_size)
+                            self.meters['train_top10acc'].update(average_top10acc, batch['x'].shape[0]*self.world_size)
+                            self.meters['train_top10acc'].update(average_top10acc, batch['x'].shape[0]*self.world_size)
+                            average_top10acc_cbi = [sum_top10acc_cbi[cb] / sum_ntoken * self.args.n_codebooks for cb in range(self.args.n_codebooks)]
+                            for cb in range(self.args.n_codebooks):
+                                self.meters[f'train_top10acc_cb{cb+1}'].update(average_top10acc_cbi[cb], batch['x'].shape[0]*self.world_size)
+
+                            if self.progress['step'] % self.args.tb_write_every_n_steps == 0:
+                                self.writer.add_scalar('train/loss', average_loss, self.progress['step'])
+                                self.writer.add_scalar('train/top10acc', average_top10acc, self.progress['step'])
+                                self.writer.add_scalar("train/ntokens", sum_ntoken, self.progress['step'])
+                                for cb in range(self.args.n_codebooks):
+                                    self.writer.add_scalar(f'train/top10acc_cb{cb+1}', average_top10acc_cbi[cb], self.progress['step'])
+
+                        if self.args.optimizer_name == "ScaledAdam":
+                            self.scaler.scale(out['loss']).backward() 
+                        else:
+                            self.scaler.scale(out['loss']/out['effective_ntoken']).backward()
+
+                    if skip_flag:
+                        self.optimizer.zero_grad()
+                        skip_flag = False
                         continue
 
-                    sum_losses += record_loss.item()
-                    sum_top10acc += top10acc.item()
-                    sum_ntoken += effective_ntoken.item()
+                    if self.args.optimizer_name != "ScaledAdam":
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.gradient_clip_val)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
 
-                    if 'top10acc_by_codebook' in out:
-                        for cb in range(self.args.n_codebooks):
-                            top10acc_cbi = out['top10acc_by_codebook'][cb]
-                            dist.all_reduce(top10acc_cbi, op=dist.ReduceOp.SUM)
-                            sum_top10acc_cbi[cb] += top10acc_cbi.item()
-                        
-                    if self.rank == 0:
-                        average_loss = sum_losses / sum_ntoken
-                        average_top10acc = sum_top10acc / sum_ntoken
-                        self.meters['train_loss'].update(average_loss, batch['x'].shape[0]*self.world_size)
-                        self.meters['train_top10acc'].update(average_top10acc, batch['x'].shape[0]*self.world_size)
-                        self.meters['train_top10acc'].update(average_top10acc, batch['x'].shape[0]*self.world_size)
-                        average_top10acc_cbi = [sum_top10acc_cbi[cb] / sum_ntoken * self.args.n_codebooks for cb in range(self.args.n_codebooks)]
-                        for cb in range(self.args.n_codebooks):
-                            self.meters[f'train_top10acc_cb{cb+1}'].update(average_top10acc_cbi[cb], batch['x'].shape[0]*self.world_size)
-
-                        if self.progress['step'] % self.args.tb_write_every_n_steps == 0:
-                            self.writer.add_scalar('train/loss', average_loss, self.progress['step'])
-                            self.writer.add_scalar('train/top10acc', average_top10acc, self.progress['step'])
-                            self.writer.add_scalar("train/ntokens", sum_ntoken, self.progress['step'])
-                            for cb in range(self.args.n_codebooks):
-                                self.writer.add_scalar(f'train/top10acc_cb{cb+1}', average_top10acc_cbi[cb], self.progress['step'])
+                    self.optimizer.zero_grad()
 
                     if self.args.optimizer_name == "ScaledAdam":
-                        self.scaler.scale(out['loss']).backward() 
+                        self.scheduler.step_batch(self.progress['step'])
                     else:
-                        self.scaler.scale(out['loss']/out['effective_ntoken']).backward()
+                        self.scheduler.step()
 
-                if skip_flag:
-                    self.optimizer.zero_grad()
-                    skip_flag = False
-                    continue
+                    if self.rank == 0:
+                        self.meters['data_time'].update(data_end_time - data_start_time)
+                        self.meters['train_time'].update(time.time() - data_end_time)
+                        if self.progress['step'] % self.args.tb_write_every_n_steps == 0:
+                            self.writer.add_scalar("train/data_time", data_end_time - data_start_time, self.progress['step'])
+                            self.writer.add_scalar("train/train_time", time.time() - data_end_time, self.progress['step'])
+                            
 
-                if self.args.optimizer_name != "ScaledAdam":
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.gradient_clip_val)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                        # logging
+                        if self.progress['step'] % self.args.print_every_n_steps == 0:
+                            log_out = {}
+                            log_out['cur_epoch'] = f"{self.progress['epoch']}/{self.args.num_epochs}" if self.args.num_epochs is not None else f"{self.progress['epoch']}"
+                            log_out['cur_step'] = f"{int(self.progress['cur_step']+1)}"
+                            log_out['total_step'] = f"{self.progress['step']}/{self.args.num_steps}"
+                            log_out['lr'] = f"{cur_lr:.7f}"
+                            log_out['ntokens'] = f"{sum_ntoken}"
+                            for key in self.meters:
+                                if self.meters[key].val != 0 or self.meters[key].avg != 0:
+                                    log_out[key] = f"{self.meters[key].val:.4f} ({self.meters[key].avg:.4f})" if isinstance(self.meters[key].val, float) else f"{self.meters[key].val}"
+                            logging.info(log_out)
+                            if np.isnan(self.meters['train_loss'].avg):
+                                logging.warning("training diverged...")
+                                raise RuntimeError("training diverged...")
 
-                self.optimizer.zero_grad()
+                    # validation and save models
+                    if self.progress['step'] % self.args.val_every_n_steps == 0:
+                        dist.barrier()
+                        self.validate_and_save()
 
-                if self.args.optimizer_name == "ScaledAdam":
-                    self.scheduler.step_batch(self.progress['step'])
-                else:
-                    self.scheduler.step()
+                    self.progress['step'] += 1
+                    self.progress['cur_step'] += 1
 
-                if self.rank == 0:
-                    self.meters['data_time'].update(data_end_time - data_start_time)
-                    self.meters['train_time'].update(time.time() - data_end_time)
-                    if self.progress['step'] % self.args.tb_write_every_n_steps == 0:
-                        self.writer.add_scalar("train/data_time", data_end_time - data_start_time, self.progress['step'])
-                        self.writer.add_scalar("train/train_time", time.time() - data_end_time, self.progress['step'])
-                        
-
-                    # logging
-                    if self.progress['step'] % self.args.print_every_n_steps == 0:
-                        log_out = {}
-                        log_out['cur_epoch'] = f"{self.progress['epoch']}/{self.args.num_epochs}" if self.args.num_epochs is not None else f"{self.progress['epoch']}"
-                        log_out['cur_step'] = f"{int(self.progress['cur_step']+1)}"
-                        log_out['total_step'] = f"{self.progress['step']}/{self.args.num_steps}"
-                        log_out['lr'] = f"{cur_lr:.7f}"
-                        log_out['ntokens'] = f"{sum_ntoken}"
-                        for key in self.meters:
-                            if self.meters[key].val != 0 or self.meters[key].avg != 0:
-                                log_out[key] = f"{self.meters[key].val:.4f} ({self.meters[key].avg:.4f})" if isinstance(self.meters[key].val, float) else f"{self.meters[key].val}"
-                        logging.info(log_out)
-                        if np.isnan(self.meters['train_loss'].avg):
-                            logging.warning("training diverged...")
-                            raise RuntimeError("training diverged...")
-
-                # validation and save models
-                if self.progress['step'] % self.args.val_every_n_steps == 0:
-                    dist.barrier()
-                    self.validate_and_save()
-
-                self.progress['step'] += 1
-                self.progress['cur_step'] += 1
-
-                data_start_time = time.time()
-            self.progress['epoch'] += 1
-            self.progress['cur_step'] = 0 # reset cur_step to be 0
+                    data_start_time = time.time()
+                self.progress['epoch'] += 1
+                self.progress['cur_step'] = 0 # reset cur_step to be 0
         dist.destroy_process_group()
 
     def validate_and_save(self):

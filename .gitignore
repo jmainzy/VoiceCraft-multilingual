@@ -31,6 +31,7 @@ src/audiocraft
 /demo/temp/*.txt
 !/demo/temp/84_121550_000074_000000.txt
 .cog/tmp/*
-data
 experiments
 *.DS_Store
+data/mydataset
+vocab*
