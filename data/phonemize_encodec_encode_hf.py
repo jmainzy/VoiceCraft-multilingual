@@ -5,7 +5,7 @@ import numpy as np
 import os
 import tqdm
 import time
-from custom_dataset import AudioDataset, load_custom_data
+from custom_dataset import EncodecDataset, load_custom_data
 from tokenizer import TextTokenizer, tokenize_text
 
 def parse_args():
@@ -89,7 +89,6 @@ if __name__ == "__main__":
     logging.info(f"time spend on loading the dataset: {time.time() - stime:.2f} seconds")
 
     splits = ['test', 'train']
-    dataset = dataset.train_test_split(test_size=0.1, shuffle=True, seed=42)
             
     logging.info(f"dataset info: {dataset}")
     logging.info(f"phonemizing...")
@@ -136,13 +135,13 @@ if __name__ == "__main__":
 
     ## encodec codes extraction
     logging.info("encodec encoding...")
-    train_dataset = AudioDataset.from_huggingface('train', dataset)
+    train_dataset = EncodecDataset.from_huggingface('train', dataset)
     print("Train data for encodec:")
     print(train_dataset.data)
     train_loader = torch.torch.utils.data.DataLoader(train_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=train_dataset.collate)
     # validation_dataset = mydataset('validation')
     # validation_loader = torch.torch.utils.data.DataLoader(validation_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=validation_dataset.collate)
-    test_dataset = AudioDataset.from_huggingface('test', dataset)
+    test_dataset = EncodecDataset.from_huggingface('test', dataset)
     print("Test data for encodec:")
     print(test_dataset.data)
     test_loader = torch.torch.utils.data.DataLoader(test_dataset, batch_size=args.mega_batch_size, shuffle=False, drop_last=False, num_workers=args.n_workers, collate_fn=test_dataset.collate)

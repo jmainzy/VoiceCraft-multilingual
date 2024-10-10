@@ -1,7 +1,7 @@
 import os
+import pickle
 import re
 from num2words import num2words
-from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
 import gradio as gr
 import torch
 import torchaudio
@@ -20,11 +20,15 @@ nltk.download('punkt')
 
 DEMO_PATH = os.getenv("DEMO_PATH", "./demo")
 TMP_PATH = os.getenv("TMP_PATH", "./demo/temp")
-MODELS_PATH = os.getenv("MODELS_PATH", "./pretrained_models")
+MODELS_PATH = os.getenv("MODELS_PATH", r"experiments\custom01\mydataset\e830M")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, align_model, voicecraft_model = None, None, None
 _whitespace_re = re.compile(r"\s+")
 align_model_options = list(DEFAULT_ALIGN_MODELS_HF.keys())
+
+
+# Set the os variable for espeak
+os.environ['PHONEMIZER_ESPEAK_LIBRARY'] = "C:\Program Files\eSpeak NG\libespeak-ng.dll"
 
 def get_random_string():
     return "".join(str(uuid.uuid4()).split("-"))
@@ -88,18 +92,40 @@ class WhisperxAlignModel:
 #             segment['text'] = replace_numbers_with_words(segment['text'])
 #         return self.align_model.align(segments, audio_path)
 
+def load_from_checkpoint(model_path):
+
+    # check model path exists
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+
+    # model = torch.load(model_path)
+    with open(os.path.join(model_path, "args.pkl"), "rb") as f:
+        model_args = pickle.load(f)
+
+    print("loading model weights...")
+    model = voicecraft.VoiceCraft(model_args)
+    ckpt_fn = os.path.join(model_path, "best_bundle.pth")
+    ckpt = torch.load(ckpt_fn, map_location='cpu')['model']
+    phn2num = torch.load(ckpt_fn, map_location='cpu')['phn2num']
+    model.load_state_dict(ckpt)
+    del ckpt
+    print("done loading weights...")
+    device = torch.device("cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+    return model, model.args, phn2num
 
 def load_models(language_choice, voicecraft_model_name):
     global align_model, voicecraft_model
 
-    if voicecraft_model_name == "330M":
-        voicecraft_model_name = "giga330M"
-    elif voicecraft_model_name == "830M":
-        voicecraft_model_name = "giga830M"
-    elif voicecraft_model_name == "330M_TTSEnhanced":
-        voicecraft_model_name = "330M_TTSEnhanced"
-    elif voicecraft_model_name == "830M_TTSEnhanced":
-        voicecraft_model_name = "830M_TTSEnhanced"
+    # if voicecraft_model_name == "330M":
+    #     voicecraft_model_name = "giga330M"
+    # elif voicecraft_model_name == "830M":
+    #     voicecraft_model_name = "giga830M"
+    # elif voicecraft_model_name == "330M_TTSEnhanced":
+    #     voicecraft_model_name = "330M_TTSEnhanced"
+    # elif voicecraft_model_name == "830M_TTSEnhanced":
+    #     voicecraft_model_name = "830M_TTSEnhanced"
 
     align_model = WhisperxAlignModel(language_choice)
 
@@ -112,13 +138,15 @@ def load_models(language_choice, voicecraft_model_name):
     #         transcribe_model = WhisperxModel(model_name, align_model)
     # transcribe_model = WhisperxModel(model_name, align_model)
 
-    voicecraft_name = f"{voicecraft_model_name}.pth"
-    model = voicecraft.VoiceCraft.from_pretrained(f"pyp1/VoiceCraft_{voicecraft_name.replace('.pth', '')}")
+    # model, config, phn2num = load_from_checkpoint(MODELS_PATH)
+    # model = voicecraft.VoiceCraft.from_pretrained(f"pyp1/VoiceCraft_{voicecraft_name.replace('.pth', '')}")
+    model = voicecraft.VoiceCraft.from_pretrained(MODELS_PATH)
     phn2num = model.args.phn2num
     config = model.args
     model.to(device)
 
-    encodec_fn = f"{MODELS_PATH}/encodec_4cb2048_giga.th"
+    encodec_fn = 'data\downloads\encodec_4cb2048_giga.th'
+    # encodec_fn = f"{MODELS_PATH}/encodec_4cb2048_giga.th"
     if not os.path.exists(encodec_fn):
         os.system(f"wget https://huggingface.co/pyp1/VoiceCraft/resolve/main/encodec_4cb2048_giga.th -O " + encodec_fn)
 

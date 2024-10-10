@@ -10,7 +10,10 @@ from scipy.stats import lognorm
 import logging
 
 class StatefulDistributedSampler(Sampler[int]):
-    def __init__(self, dataset, batch_size, num_replicas = None, rank = None, shuffle = True, seed = 0, drop_last = False):
+    def __init__(self, dataset, 
+            batch_size, 
+            device: torch.device, num_replicas = None, rank = None, 
+            shuffle = True, seed = 0, drop_last = False):
         if num_replicas is None:
             if not dist.is_available():
                 raise RuntimeError("Requires distributed package to be available")
@@ -30,6 +33,7 @@ class StatefulDistributedSampler(Sampler[int]):
         self.epoch = 0
         self.cur_epoch = 0
         self.drop_last = drop_last
+        self.device = device
         # If the dataset length is evenly divisible by # of replicas, then there
         # is no need to drop any data, since the dataset will be split equally.
         if self.drop_last and len(self.dataset) % self.num_replicas != 0:  # type: ignore[arg-type]
@@ -61,7 +65,7 @@ class StatefulDistributedSampler(Sampler[int]):
 
         if self.shuffle:
             # deterministically shuffle based on epoch and seed
-            g = torch.Generator()
+            g = torch.Generator(device=self.device.type)
             g.manual_seed(self.seed + self.epoch)
             indices = torch.randperm(len(self.dataset), generator=g).tolist()  # type: ignore[arg-type]
         else:
@@ -100,7 +104,8 @@ class StatefulDistributedSampler(Sampler[int]):
 
 
 class StatefulSampler(Sampler):
-    def __init__(self, data_source_length, batch_size, use_random=True, seed=1, epoch=0):
+    def __init__(self, data_source_length, batch_size, device:torch.device, 
+            use_random=True, seed=1, epoch=0):
         self.use_random = use_random
         self.data_source_length = data_source_length
         self.num_samples = self.data_source_length
@@ -109,6 +114,7 @@ class StatefulSampler(Sampler):
         self.seed = seed
         self.epoch = epoch
         self.cur_step = 0
+        self.device=device
 
     def __len__(self):
         return self.num_samples
@@ -122,7 +128,7 @@ class StatefulSampler(Sampler):
         self.epoch = epoch
         if self.use_random:
             # deterministically shuffle based on epoch and seed
-            g = torch.Generator()
+            g = torch.Generator(device=self.device.type)
             g.manual_seed(self.seed + self.epoch)
             self.indices = torch.randperm(self.data_source_length, generator=g).tolist()  # type: ignore[arg-type]
         else:
@@ -284,6 +290,7 @@ class DistributedDynamicBatchSampler(Sampler):
         self,
         dataset,
         args,
+        device: torch.device,
         num_replicas = None, 
         rank = None, 
         shuffle = True, 
@@ -315,6 +322,7 @@ class DistributedDynamicBatchSampler(Sampler):
         max_batch_length = self.args.max_num_tokens if dataset.split == "train" else self.args.val_max_num_tokens
         logging.info(f"max_num_tokens per GPU for {dataset.split} split: {max_batch_length}")
         num_buckets = self.args.num_buckets
+        self.device = device
         #############
         
 
@@ -440,7 +448,7 @@ class DistributedDynamicBatchSampler(Sampler):
 
         if self._batch_ordering == "random":
             # deterministically shuffle based on epoch and seed
-            g = torch.Generator()
+            g = torch.Generator(device=self.device.type)
             g.manual_seed(self._seed + self._epoch) # since the random seed is based on self._seed and self._epoch, it should be the same for different processes when using DDP, and therefore the generated order should be the same across different process, this is important, because each replica will only take a portion of it, we want to make sure they take a non-overlapping portion, and all of them constitute the entire dataset
             sampler = torch.randperm(
                 len(self._batches), generator=g
@@ -468,7 +476,7 @@ class DistributedDynamicBatchSampler(Sampler):
         logging.info("DynamicBatchSampler: Generating dynamic batches")
         if self._shuffle_ex:
             # deterministically shuffle based on epoch and seed
-            g = torch.Generator()
+            g = torch.Generator(device=self.device.type)
             g.manual_seed(self._seed + self._epoch) # since the random seed is based on self._seed and self._epoch, it should be the same for different processes when using DDP, and therefore the generated order should be the same across different process, this is important, because each replica will only take a portion of it, we want to make sure they take a non-overlapping portion, and all of them constitute the entire dataset
             sampler = torch.randperm(len(self._dataset), generator=g).tolist()  # type: ignore 
             # pyp note: this is actually randomly permoted indices

@@ -132,8 +132,8 @@ class Pattern:
         # note that using the valid_layout will result in a truncated sequence up to the valid steps
         ref_layout = self.valid_layout if keep_only_valid_steps else self.layout
         # single item indexing being super slow with pytorch vs. numpy, so we use numpy here
-        indexes = torch.zeros(n_q, len(ref_layout), dtype=torch.long).numpy()
-        mask = torch.zeros(n_q, len(ref_layout), dtype=torch.bool).numpy()
+        indexes = torch.zeros(n_q, len(ref_layout), dtype=torch.long, device=torch.device('cpu')).numpy()
+        mask = torch.zeros(n_q, len(ref_layout), dtype=torch.bool, device=torch.device('cpu')).numpy()
         # fill indexes with last sequence step value that will correspond to our special token
         # the last value is n_q * timesteps as we have flattened z and append special token as the last token
         # which will correspond to the index: n_q * timesteps
@@ -205,8 +205,8 @@ class Pattern:
             ref_layout = ref_layout[1:]
 
         # single item indexing being super slow with pytorch vs. numpy, so we use numpy here
-        indexes = torch.zeros(n_q, timesteps, dtype=torch.long).numpy()
-        mask = torch.zeros(n_q, timesteps, dtype=torch.bool).numpy()
+        indexes = torch.zeros(n_q, timesteps, dtype=torch.long, device=torch.device('cpu')).numpy()
+        mask = torch.zeros(n_q, timesteps, dtype=torch.bool, device=torch.device('cpu')).numpy()
         # fill indexes with last sequence step value that will correspond to our special token
         indexes[:] = n_q * sequence_steps
         for s, sequence_codes in enumerate(ref_layout):

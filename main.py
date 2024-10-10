@@ -6,6 +6,7 @@ import logging
 import torch.distributed as dist
 from config import MyParser
 from steps import trainer
+import os
 
 def set_torch_config():
 
@@ -32,6 +33,7 @@ if __name__ == "__main__":
     )
     logging.basicConfig(format=formatter, level=logging.INFO)
     device = set_torch_config()
+    print('starting...')
 
     torch.cuda.empty_cache()
     args = MyParser().parse_args()
@@ -55,12 +57,37 @@ if __name__ == "__main__":
     else:
         with open("%s/args.pkl" % args.exp_dir, "wb") as f:
             pickle.dump(args, f)
+            
+    # Disable libuv because PyTorch for Windows isn't built with support
+    os.environ["USE_LIBUV"] = "0"
 
+    # initialize process group
+    # Windows users may have to use "gloo" instead of "nccl" as backend
+    # nccl: NVIDIA Collective Communication Library
+    # gloo: Facebook Collective Communication Library
     if device == "cuda":
-        dist.init_process_group("nccl", init_method='env://')
+        if torch.cuda.nccl.is_available(torch.randn(1).cuda()):
+            logging.info('Using cuda + nccl')
+            dist.init_process_group("nccl", init_method='env://')
+        else:
+            logging.info('nccl not available. Using gloo with device '+str(device))
+            dist.init_process_group("gloo", init_method='env://')
     else:
+        logging.info('Using gloo with device '+str(device))
         dist.init_process_group("gloo", init_method='env://')
 
+    # Check what version of PyTorch is installed
+    logging.info(torch.__version__)
+
+    # Check the current CUDA version being used
+    logging.info("CUDA Version: ", torch.version.cuda)
+
+    # Check if CUDA is available and if so, print the device name
+    logging.info("Device name:", torch.cuda.get_device_properties("cuda").name)
+
+    # Check if FlashAttention is available
+    logging.info("FlashAttention available:", torch.backends.cuda.flash_sdp_enabled())
+    
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     # torch.set_device(rank)

@@ -1,41 +1,51 @@
 import os
-from typing import Optional
-from datasets.info import DatasetInfo
-from datasets.splits import NamedSplit
-from datasets.table import Table
 import torch
 import random
 import copy
 import logging
 import shutil
-import glob
 from datasets import Audio, Dataset, DatasetDict
 import pandas as pd
 
-def load_custom_data(dir):
+def read_split(dir, split):
+    audio_folder = "audio"
+
+    metadata={"audio":[], "duration":[], "segment_id":[], "text":[], "file":[]}
+    file = os.path.join(dir, split+'.tsv')
+    print('reading file '+str(file))
+    data = pd.read_csv(file, sep='\t')
+    for index, row in data.iterrows():
+        metadata["audio"].append(os.path.join(dir, audio_folder, row['filename']))
+        metadata["duration"].append(float(row['duration']))
+        metadata["segment_id"].append(row['filename'].split('.')[-2])
+        metadata["text"].append(row['latin'])
+        # metadata["text_latin"].append(row['latin'])
+        metadata["file"].append(file)
+    
+    dataset = Dataset.from_dict(metadata).cast_column("audio", Audio(sampling_rate=16_000))
+
+    return dataset
+
+def load_custom_data(dir, split=None):
     '''
     Make an audio dataset dict from a folder
     This returns a Dataset object in HuggingFace Audio format
     '''
     logging.info(f"Reading dataset from {dir}")
-    audio_folder = "audio"
-    splits = ['train', 'test', 'validation']
-    datasets = DatasetDict()
-    for split in splits:
-        metadata={"audio":[], "duration":[], "segment_id":[], "text":[],"text_latin":[], "file":[]}
-        file = os.path.join(dir, split+'.tsv')
-        print('reading file '+str(file))
-        data = pd.read_csv(file, sep='\t')
-        for index, row in data.iterrows():
-            metadata["audio"].append(os.path.join(dir, audio_folder, row['filename']))
-            metadata["duration"].append(float(row['duration']))
-            metadata["segment_id"].append(row['filename'].split('.')[-2])
-            metadata["text"].append(row['text'])
-            metadata["text_latin"].append(row['latin'])
-            metadata["file"].append(file)
 
-        dataset = Dataset.from_dict(metadata).cast_column("audio", Audio(sampling_rate=16_000))
-        datasets[split] = dataset
+    datasets = DatasetDict()
+
+    splits = ['train', 'test', 'validation']
+
+    if not split:
+        # get all the splits
+        for split in splits:
+            datasets[split]=read_split(dir, split)
+    else:
+        # get one split
+        if split not in splits:
+            raise ValueError("No split found "+str(split))
+        datasets[split]=read_split(dir, split)
     return datasets
 
 
@@ -112,7 +122,7 @@ class TTSDataset(torch.utils.data.Dataset):
         self.split = split
         assert self.split in ['train', 'test', 'validation']
         
-        self.data = load_custom_data(self.args.dataset_dir)[split]
+        self.data = load_custom_data(self.args.dataset_dir, split)[split]
 
         print(self.data)
         if len(self.data) == 0:
